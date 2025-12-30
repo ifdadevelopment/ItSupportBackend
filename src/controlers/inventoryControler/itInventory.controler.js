@@ -272,10 +272,6 @@ export const importInventoryExcel = async (req, res) => {
 
     const ext = (file.originalname.split(".").pop() || "").toLowerCase();
     let rows = [];
-
-    // ------------------------------------------------------
-    // 1️⃣ HANDLE CSV IMPORT
-    // ------------------------------------------------------
     if (ext === "csv") {
       const csvText = file.buffer.toString("utf8");
       const stream = Readable.from(csvText);
@@ -297,10 +293,6 @@ export const importInventoryExcel = async (req, res) => {
 
       rows = results.map((r) => normalizeRow(r));
     }
-
-    // ------------------------------------------------------
-    // 2️⃣ HANDLE EXCEL IMPORT (.xlsx / .xls)
-    // ------------------------------------------------------
     if (ext === "xlsx" || ext === "xls") {
       const workbook = new ExcelJS.Workbook();
       await workbook.xlsx.load(file.buffer);
@@ -312,8 +304,6 @@ export const importInventoryExcel = async (req, res) => {
           message: "Invalid Excel file",
         });
       }
-
-      // Read header row
       const headerRow = sheet
         .getRow(1)
         .values.slice(1)
@@ -340,20 +330,12 @@ export const importInventoryExcel = async (req, res) => {
         if (Object.keys(clean).length) rows.push(clean);
       });
     }
-
-    // ------------------------------------------------------
-    // 3️⃣ VALIDATION
-    // ------------------------------------------------------
     if (!rows.length) {
       return res.status(400).json({
         success: false,
         message: "No valid rows found in file",
       });
     }
-
-    // ------------------------------------------------------
-    // 4️⃣ DATA NORMALIZATION + BULK UPSERT
-    // ------------------------------------------------------
     const ops = [];
     let skipped = 0;
 
