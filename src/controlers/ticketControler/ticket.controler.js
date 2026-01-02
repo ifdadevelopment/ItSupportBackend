@@ -1,4 +1,5 @@
 import { uploadFileToS3 } from "../../middleware/upload.middleware.js";
+import DeviceToken from "../../model/DeviceToken.js";
 import Ticket from "../../model/ticketModel/model.ticket.js";
 import {
   getTickets,
@@ -17,7 +18,48 @@ import { getInventoryById } from "../../service/inventoryService/inventory.servi
 import { getItInventoryById } from "../../service/inventoryService/itInventory.service.js";
 import { findAllUserService, findUserService } from "../../service/user.service.js";
 import { getIo } from "../../socket.js";
+import { sendToToken } from "../../utils/fcmClient.js";
 import { deleteFileFromS3 } from "../../utils/s3Delete.js";
+/* ---------- TICKET NOTIFICATION HELPER ---------- */
+async function notifyTicketUsers({
+  notifyAdmins = false,
+  notifyTechnicians = false,
+  notifyUserId = null,
+  title,
+  body,
+  data = {},
+}) {
+  const tokenSet = new Set();
+
+  if (notifyAdmins) {
+    const admins = await DeviceToken.find({ "meta.userType": "admin" }).lean();
+    admins.forEach(d => d?.token && tokenSet.add(d.token));
+  }
+
+  if (notifyTechnicians) {
+    const techs = await DeviceToken.find({ "meta.userType": "technician" }).lean();
+    techs.forEach(d => d?.token && tokenSet.add(d.token));
+  }
+
+  if (notifyUserId) {
+    const users = await DeviceToken.find({
+      "meta.userId": notifyUserId.toString(),
+    }).lean();
+    users.forEach(d => d?.token && tokenSet.add(d.token));
+  }
+
+  await Promise.allSettled(
+    [...tokenSet].map(token =>
+      sendToToken(token, {
+        data: {
+          title,
+          body,
+          ...data,
+        },
+      })
+    )
+  );
+}
 
 
 /* ---------- GET TICKETS ---------- */
@@ -80,11 +122,40 @@ export const getTicketByIdController = async (req, res) => {
 // };
 
 
+// export const createTicketController = async (req, res) => {
+//   try {
+//     const uploads = Array.isArray(req.s3Uploads) ? req.s3Uploads : [];
+
+//     const ticketData = {
+//       ...req.body,
+//       requestedBy: req.user._id,
+//       attachments: uploads.map(file => ({
+//         url: file.url,
+//         key: file.key,
+//         originalName: file.originalName,
+//         mimetype: file.type,
+//         size: file.size,
+//       }))
+//     };
+
+//     const ticket = await Ticket.create(ticketData);
+
+//     return res.status(201).json({
+//       success: true,
+//       message: "Ticket created successfully",
+//       data: ticket,
+//     });
+
+//   } catch (err) {
+//     console.log("Ticket Create Error:", err);
+//     return res.status(500).json({ success: false, message: "Failed to create ticket" });
+//   }
+// };
 export const createTicketController = async (req, res) => {
   try {
     const uploads = Array.isArray(req.s3Uploads) ? req.s3Uploads : [];
 
-    const ticketData = {
+    const ticket = await Ticket.create({
       ...req.body,
       requestedBy: req.user._id,
       attachments: uploads.map(file => ({
@@ -93,17 +164,29 @@ export const createTicketController = async (req, res) => {
         originalName: file.originalName,
         mimetype: file.type,
         size: file.size,
-      }))
-    };
+      })),
+    });
 
-    const ticket = await Ticket.create(ticketData);
+    // 🔔 NOTIFY ADMINS + TECHNICIANS
+    await notifyTicketUsers({
+      notifyAdmins: true,
+      notifyTechnicians: true,
+      title: "🎫 New Ticket Created",
+      body: `${req.user.name} created a new ticket`,
+      data: {
+        type: "ticket_created",
+        ticketId: ticket._id.toString(),
+        status: ticket.status,
+        userId: req.user._id.toString(),
+        userName: req.user.name,
+      },
+    });
 
     return res.status(201).json({
       success: true,
       message: "Ticket created successfully",
       data: ticket,
     });
-
   } catch (err) {
     console.log("Ticket Create Error:", err);
     return res.status(500).json({ success: false, message: "Failed to create ticket" });
@@ -115,17 +198,47 @@ export const createTicketController = async (req, res) => {
 
 
 /* ---------- UPDATE TICKET ---------- */
+// export const updateTicketController = async (req, res) => {
+//   try {
+//     const ticket = await updateTicket(req.params.id, req.body);
+//     const io = getIo();
+//     io.emit("update_ticket_status", {
+
+//     });
+//     return res.status(200).json({ success: true, message: "Ticket updated successfully", data: ticket });
+//   } catch (err) {
+
+//     return res.status(500).json({ success: false, message: "Error updating ticket", error: err.message });
+//   }
+// };
 export const updateTicketController = async (req, res) => {
   try {
     const ticket = await updateTicket(req.params.id, req.body);
-    const io = getIo();
-    io.emit("update_ticket_status", {
 
+    // 🔔 Notify Ticket Owner
+    await notifyTicketUsers({
+      notifyUserId: ticket.requestedBy,
+      title: "🔄 Ticket Updated",
+      body: `Your ticket status is now "${ticket.status}"`,
+      data: {
+        type: "ticket_updated",
+        ticketId: ticket._id.toString(),
+        status: ticket.status,
+        updatedBy: req.user.user_type,
+      },
     });
-    return res.status(200).json({ success: true, message: "Ticket updated successfully", data: ticket });
-  } catch (err) {
 
-    return res.status(500).json({ success: false, message: "Error updating ticket", error: err.message });
+    return res.status(200).json({
+      success: true,
+      message: "Ticket updated successfully",
+      data: ticket,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Error updating ticket",
+      error: err.message,
+    });
   }
 };
 
@@ -141,21 +254,61 @@ export const updateTicketController = async (req, res) => {
 // };
 
 /* ---------- ADD COMMENT ---------- */
+// export const addCommentController = async (req, res) => {
+//   try {
+//     const { content, isInternal } = req.body;
+//     const userId = req.user._id;
+//     const ticket = await Ticket.findOne({ _id: req.params.ticketId });
+//     ticket.addComment(req.user._id, content);
+//     const io = getIo();
+//     io.emit("add_comment", {
+
+//     })
+//     // const ticket = await addComment(req.params.ticketId, userId, content, isInternal);
+//     return res.status(200).json({ success: true, message: "Comment added successfully", data: ticket });
+//   } catch (err) {
+
+//     return res.status(500).json({ success: false, message: "Error adding comment", error: err.message });
+//   }
+// };
 export const addCommentController = async (req, res) => {
   try {
-    const { content, isInternal } = req.body;
-    const userId = req.user._id;
-    const ticket = await Ticket.findOne({ _id: req.params.ticketId });
+    const { content } = req.body;
+    const ticket = await Ticket.findById(req.params.ticketId);
+
+    if (!ticket) {
+      return res.status(404).json({ success: false, message: "Ticket not found" });
+    }
+
     ticket.addComment(req.user._id, content);
-    const io = getIo();
-    io.emit("add_comment", {
+    await ticket.save();
 
-    })
-    // const ticket = await addComment(req.params.ticketId, userId, content, isInternal);
-    return res.status(200).json({ success: true, message: "Comment added successfully", data: ticket });
+    const isUser = req.user.user_type === "user";
+
+    await notifyTicketUsers({
+      notifyAdmins: isUser,
+      notifyTechnicians: isUser,
+      notifyUserId: !isUser ? ticket.requestedBy : null,
+      title: "💬 New Comment on Ticket",
+      body: `${req.user.name} commented on ticket`,
+      data: {
+        type: "ticket_comment",
+        ticketId: ticket._id.toString(),
+        commentedBy: req.user.user_type,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Comment added successfully",
+      data: ticket,
+    });
   } catch (err) {
-
-    return res.status(500).json({ success: false, message: "Error adding comment", error: err.message });
+    return res.status(500).json({
+      success: false,
+      message: "Error adding comment",
+      error: err.message,
+    });
   }
 };
 
@@ -172,14 +325,48 @@ export const assignTicketController = async (req, res) => {
 };
 
 /* ---------- RESOLVE TICKET ---------- */
+// export const resolveTicketController = async (req, res) => {
+//   try {
+//     const { resolution } = req.body;
+//     const ticket = await resolveTicket(req.params.id, resolution);
+//     return res.status(200).json({ success: true, message: "Ticket resolved successfully", data: ticket });
+//   } catch (err) {
+
+//     return res.status(500).json({ success: false, message: "Error resolving ticket", error: err.message });
+//   }
+// };
 export const resolveTicketController = async (req, res) => {
   try {
     const { resolution } = req.body;
-    const ticket = await resolveTicket(req.params.id, resolution);
-    return res.status(200).json({ success: true, message: "Ticket resolved successfully", data: ticket });
-  } catch (err) {
 
-    return res.status(500).json({ success: false, message: "Error resolving ticket", error: err.message });
+    // 1️⃣ Resolve ticket
+    const ticket = await resolveTicket(req.params.id, resolution);
+
+    // 2️⃣ Notify Ticket Owner (User)
+    await notifyTicketUsers({
+      notifyUserId: ticket.requestedBy,
+      title: "✅ Ticket Resolved",
+      body: `Your ticket has been resolved by ${req.user.name}`,
+      data: {
+        type: "ticket_resolved",
+        ticketId: ticket._id.toString(),
+        status: ticket.status,
+        resolvedBy: req.user.user_type,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Ticket resolved successfully",
+      data: ticket,
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Error resolving ticket",
+      error: err.message,
+    });
   }
 };
 

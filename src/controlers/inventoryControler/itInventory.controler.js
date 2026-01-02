@@ -6,6 +6,44 @@ import csvParser from "csv-parser";
 import fs from "fs";
 import path from "path";
 import { createItInventory, getAllItInventories, getItInventoryById, updateItInventoryService } from "../../service/inventoryService/itInventory.service.js";
+
+/* ---------- IT INVENTORY NOTIFICATION HELPER ---------- */
+async function notifyItInventoryUsers({
+  actorType,
+  title,
+  body,
+  data = {},
+}) {
+  const notifyAdmins = actorType === "technician";
+  const notifyTechnicians = actorType === "admin";
+
+  const tokenSet = new Set();
+
+  if (notifyAdmins) {
+    const admins = await DeviceToken.find({ "meta.userType": "admin" }).lean();
+    admins.forEach(d => d?.token && tokenSet.add(d.token));
+  }
+
+  if (notifyTechnicians) {
+    const techs = await DeviceToken.find({ "meta.userType": "technician" }).lean();
+    techs.forEach(d => d?.token && tokenSet.add(d.token));
+  }
+
+  await Promise.allSettled(
+    [...tokenSet].map(token =>
+      sendToToken(token, {
+        data: {
+          title,
+          body,
+          ...data,
+        },
+      })
+    )
+  );
+}
+
+
+
 const getChangedFields = (oldData, newData) => {
   const diff = {};
   Object.keys(newData).forEach((key) => {
@@ -19,13 +57,45 @@ const getChangedFields = (oldData, newData) => {
   return diff;
 };
 
+// export const createItInventoryController = async (req, res) => {
+//   try {
+//     const itInventory = await createItInventory({ ...req.body, requestedBy: req.user._id });
+//     return res.status(200).json({ success: true, message: "Inventory Created Successfully", data: itInventory });
+//   } catch (err) {
+//     console.log(err)
+//     return res.status(400).json({ success: false, message: "Error creating It Inventory", error: err.message });
+//   }
+// };
 export const createItInventoryController = async (req, res) => {
   try {
-    const itInventory = await createItInventory({ ...req.body, requestedBy: req.user._id });
-    return res.status(200).json({ success: true, message: "Inventory Created Successfully", data: itInventory });
+    const itInventory = await createItInventory({
+      ...req.body,
+      requestedBy: req.user._id,
+    });
+
+    await notifyItInventoryUsers({
+      actorType: req.user.user_type,
+      title: "🖥️ Inventory Created",
+      body: `${req.user.name} added a new IT inventory item`,
+      data: {
+        type: "it_inventory_created",
+        inventoryId: itInventory._id.toString(),
+        createdBy: req.user.user_type,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Inventory Created Successfully",
+      data: itInventory,
+    });
+
   } catch (err) {
-    console.log(err)
-    return res.status(400).json({ success: false, message: "Error creating It Inventory", error: err.message });
+    return res.status(400).json({
+      success: false,
+      message: "Error creating It Inventory",
+      error: err.message,
+    });
   }
 };
 
@@ -76,12 +146,12 @@ export const getPcOptions = async (req, res) => {
 export const getItInventoryController = async (req, res) => {
   try {
     const filters = { ...req.query };
-    
+
     const itInventory = await getAllItInventories(filters);
 
     return res.status(200).json({ success: true, data: itInventory });
   } catch (err) {
-    
+
     return res.status(500).json({
       success: false,
       message: "Error fetching IT inventories",
@@ -89,6 +159,59 @@ export const getItInventoryController = async (req, res) => {
     });
   }
 };
+export const updateItInventoryController = async (req, res) => {
+  try {
+    const userType = req.user.user_type;
+
+    if (!["admin", "technician"].includes(userType)) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied",
+      });
+    }
+
+    const id = req.params.id;
+    const body = req.body;
+
+    const updated = await ItInventoryModel.findByIdAndUpdate(id, body, {
+      new: true,
+      runValidators: true,
+    })
+      .populate("assignedTo", "name email")
+      .lean();
+
+    if (!updated) {
+      return res.status(404).json({
+        success: false,
+        message: "Inventory not found",
+      });
+    }
+
+    await notifyItInventoryUsers({
+      actorType: userType,
+      title: "✏️ Inventory Updated",
+      body: `${req.user.name} updated an IT inventory item`,
+      data: {
+        type: "it_inventory_updated",
+        inventoryId: updated._id.toString(),
+        updatedBy: userType,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Inventory updated successfully",
+      data: updated,
+    });
+  } catch (err) {
+    console.error("UPDATE ERROR:", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
 
 export const updateItInventoryControler = async (req, res) => {
   try {
@@ -108,7 +231,7 @@ export const getItInventoryByIdController = async (req, res) => {
     const itInventory = await getItInventoryById(req.params.id);
     return res.status(200).json({ success: true, data: itInventory });
   } catch (err) {
-    
+
     return res.status(500).json({
       success: false,
       message: "Error fetching IT inventories",
@@ -390,7 +513,16 @@ export const importInventoryExcel = async (req, res) => {
     }
 
     const result = await ItInventoryModel.bulkWrite(ops);
-
+    await notifyItInventoryUsers({
+      actorType: req.user.user_type,
+      title: "📥 Inventory Imported",
+      body: `${req.user.name} imported IT inventory via Excel`,
+      data: {
+        type: "it_inventory_import",
+        inserted: result.upsertedCount,
+        updated: result.modifiedCount,
+      },
+    });
     return res.json({
       success: true,
       message: "Import completed successfully",
@@ -626,90 +758,90 @@ export const downloadInventoryTemplate = async (req, res) => {
   }
 };
 
-export const updateItInventoryController = async (req, res) => {
-  try {
-    const userType = req.user.user_type; 
+// export const updateItInventoryController = async (req, res) => {
+//   try {
+//     const userType = req.user.user_type; 
 
-    if (!["admin", "technician"].includes(userType)) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied",
-      });
-    }
+//     if (!["admin", "technician"].includes(userType)) {
+//       return res.status(403).json({
+//         success: false,
+//         message: "Access denied",
+//       });
+//     }
 
-    const id = req.params.id;
-    const body = req.body;
+//     const id = req.params.id;
+//     const body = req.body;
 
-    if (!body.category) {
-      return res.status(400).json({
-        success: false,
-        message: "Category is required",
-      });
-    }
+//     if (!body.category) {
+//       return res.status(400).json({
+//         success: false,
+//         message: "Category is required",
+//       });
+//     }
 
-    const REQUIRED_FOR_DISPLAY = new Set([
-      "manufactureBy",
-      "displayTag",
-      "mainLocation",
-      "location",
-    ]);
+//     const REQUIRED_FOR_DISPLAY = new Set([
+//       "manufactureBy",
+//       "displayTag",
+//       "mainLocation",
+//       "location",
+//     ]);
 
-    const REQUIRED_FOR_COMPUTERS = new Set([
-      "manufactureBy",
-      "tagNoCpu",
-      "operatingSystem",
-      "ram",
-      "storage",
-      "processor",
-      "macAddress",
-      "mainLocation",
-      "location",
-      "domain",
-    ]);
+//     const REQUIRED_FOR_COMPUTERS = new Set([
+//       "manufactureBy",
+//       "tagNoCpu",
+//       "operatingSystem",
+//       "ram",
+//       "storage",
+//       "processor",
+//       "macAddress",
+//       "mainLocation",
+//       "location",
+//       "domain",
+//     ]);
 
-    const requiredSet =
-      body.category === "Display"
-        ? REQUIRED_FOR_DISPLAY
-        : REQUIRED_FOR_COMPUTERS;
+//     const requiredSet =
+//       body.category === "Display"
+//         ? REQUIRED_FOR_DISPLAY
+//         : REQUIRED_FOR_COMPUTERS;
 
-    for (const field of requiredSet) {
-      if (
-        body[field] === undefined ||
-        body[field] === null ||
-        String(body[field]).trim() === ""
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: `${field} cannot be empty`,
-        });
-      }
-    }
+//     for (const field of requiredSet) {
+//       if (
+//         body[field] === undefined ||
+//         body[field] === null ||
+//         String(body[field]).trim() === ""
+//       ) {
+//         return res.status(400).json({
+//           success: false,
+//           message: `${field} cannot be empty`,
+//         });
+//       }
+//     }
 
-    const updated = await ItInventoryModel.findByIdAndUpdate(id, body, {
-      new: true,
-      runValidators: true,
-    })
-      .populate("assignedTo", "name email")
-      .lean();
+//     const updated = await ItInventoryModel.findByIdAndUpdate(id, body, {
+//       new: true,
+//       runValidators: true,
+//     })
+//       .populate("assignedTo", "name email")
+//       .lean();
 
-    if (!updated) {
-      return res.status(404).json({
-        success: false,
-        message: "Inventory not found",
-      });
-    }
+//     if (!updated) {
+//       return res.status(404).json({
+//         success: false,
+//         message: "Inventory not found",
+//       });
+//     }
 
-    return res.status(200).json({
-      success: true,
-      message: "Inventory updated successfully",
-      data: updated,
-    });
+//     return res.status(200).json({
+//       success: true,
+//       message: "Inventory updated successfully",
+//       data: updated,
+//     });
 
-  } catch (err) {
-    console.error("UPDATE ERROR:", err);
-    return res.status(500).json({ success: false, message: err.message });
-  }
-};
+//   } catch (err) {
+//     console.error("UPDATE ERROR:", err);
+//     return res.status(500).json({ success: false, message: err.message });
+//   }
+// };
 export const deleteItInventoryController = async (req, res) => {
   try {
     const userType = req.user.user_type;
@@ -732,7 +864,15 @@ export const deleteItInventoryController = async (req, res) => {
     }
 
     await ItInventoryModel.findByIdAndDelete(id);
-
+    await notifyItInventoryUsers({
+      actorType: req.user.user_type,
+      title: "🗑️ Inventory Deleted",
+      body: `${req.user.name} deleted an IT inventory item`,
+      data: {
+        type: "it_inventory_deleted",
+        inventoryId: id,
+      },
+    });
     return res.status(200).json({
       success: true,
       message: "Inventory deleted successfully",
@@ -905,7 +1045,6 @@ export const getLastUpdatedById = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
-// 🟩 Fetch ALL ITEMS sorted by LAST UPDATED (descending)
 export const getAllLastUpdated = async (req, res) => {
   try {
     const items = await ItInventoryModel.find({})
@@ -923,7 +1062,6 @@ export const getAllLastUpdated = async (req, res) => {
   }
 };
 
-// 🟪 Fetch FULL UPDATE HISTORY of one item
 export const getFullUpdateHistory = async (req, res) => {
   try {
     const id = req.params.id;
@@ -980,17 +1118,11 @@ export const getInventoryByIdController = async (req, res) => {
         message: "Inventory not found",
       });
     }
-
-    // TOKEN FOR UI DISPLAY
     data.token =
       data.category === "Computers"
         ? data.tagNoCpu || null
         : data.displayTag || null;
-
-    // ⭐ FIXED: COUNT ALL TICKETS RELATED TO THIS INVENTORY
     data.ticketCount = await Ticket.countDocuments({ pc: id });
-
-    // REQUIRED FIELD LOGIC (unchanged)
     const REQUIRED_FOR_DISPLAY = new Set([
       "manufactureBy",
       "displayTag",
@@ -1023,8 +1155,6 @@ export const getInventoryByIdController = async (req, res) => {
         data[field] = "";
       }
     }
-
-    // Extra options (unchanged)
     data.requiredFields = [...requiredSet];
     data.missingRequiredFields = missing;
     data.options = {
@@ -1067,8 +1197,6 @@ export const getAllInventoryController = async (req, res) => {
       .populate("assignedTo", "name email")
       .sort({ updatedAt: -1 })
       .lean();
-
-    // ⭐ FIX: Count tickets for each Inventory item
     data = await Promise.all(
       data.map(async (item) => {
         const ticketCount = await Ticket.countDocuments({ pc: item._id });

@@ -88,7 +88,7 @@ import {
     uploadFileToS3,
 } from "../middleware/upload.middleware.js";
 import { deleteFeedbackController, getFeedbackByTypeController, submitFeedbackController } from "../controlers/feedback.controller.js";
-import { generatePushTokenController, savePushTokenController } from "../controlers/notification.controlers.js";
+import {  resetBadge, saveToken, sendByProjectId } from "../controlers/notification.controlers.js";
 
 const inventoryUpload = multer({ storage: multer.memoryStorage() });
 const routeFunc = (app) => {
@@ -250,9 +250,10 @@ const routeFunc = (app) => {
     app.get("/inventory/:id/last-update", requireUser, getLastUpdatedById);
     app.get("/inventory-last-updated", requireUser, getAllLastUpdated);
     app.get("/inventory/:id/update-history", requireUser, getFullUpdateHistory);
-    //Notification
-    app.post("/push-token", requireUser, savePushTokenController);
-    app.get("/push-token/generator", requireUser, generatePushTokenController);
+    /* Notifications */
+    app.post("/save-token", requireUser, saveToken);
+    app.post("/send-by-project", sendByProjectId);
+    app.post("/reset-badge", resetBadge);
 };
 
 export default routeFunc;

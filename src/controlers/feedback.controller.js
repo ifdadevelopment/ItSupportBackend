@@ -11,6 +11,39 @@ const s3 = new S3Client({
 });
 
 
+// export const submitFeedbackController = async (req, res) => {
+//   try {
+//     const { name, email, phone, message, rating, type } = req.body;
+
+//     let attachments = [];
+//     if (req.s3Uploads?.length > 0) {
+//       attachments = req.s3Uploads.map((f) => ({ url: f.url }));
+//     }
+
+//     const newFeedback = await Feedback.create({
+//       name,
+//       email,
+//       phone,
+//       message,
+//       rating: Number(rating),
+//       type,
+//       attachments,
+//       userId: req.user?._id,
+//     });
+
+//     return res.status(200).json({
+//       success: true,
+//       message: "Feedback submitted successfully",
+//       data: newFeedback,
+//     });
+//   } catch (err) {
+//     console.log("FEEDBACK ERROR:", err);
+//     return res.status(500).json({ success: false, message: "Server error" });
+//   }
+// };
+
+
+// ⭐ GET FEEDBACK WITH TYPE FILTER
 export const submitFeedbackController = async (req, res) => {
   try {
     const { name, email, phone, message, rating, type } = req.body;
@@ -31,22 +64,61 @@ export const submitFeedbackController = async (req, res) => {
       userId: req.user?._id,
     });
 
+    /**
+     * 🔔 NOTIFY ADMINS (FCM)
+     */
+    const adminDevices = await DeviceToken.find({
+      "meta.userType": "admin",
+    }).lean();
+
+    if (!adminDevices.length) {
+      console.log("⚠️ No admin device tokens found");
+    } else {
+      const userName = req.user?.name || name || "User";
+
+      const title = "📩 New Feedback Received";
+      const body = `${userName} submitted a new feedback`;
+
+      await Promise.allSettled(
+        adminDevices
+          .filter((d) => d?.token)
+          .map((d) =>
+            sendToToken(d.token, {
+              data: {
+                title,
+                body,
+                type: "feedback_created",
+                feedbackId: newFeedback._id.toString(),
+                userId: newFeedback.userId?.toString() || "",
+                feedbackType: type || "",
+                rating: String(rating || ""),
+              },
+            })
+          )
+      );
+
+      console.log("✅ Admin feedback notification sent");
+    }
+
     return res.status(200).json({
       success: true,
       message: "Feedback submitted successfully",
       data: newFeedback,
     });
   } catch (err) {
-    console.log("FEEDBACK ERROR:", err);
-    return res.status(500).json({ success: false, message: "Server error" });
+    console.log("❌ FEEDBACK ERROR:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
   }
 };
 
 
-// ⭐ GET FEEDBACK WITH TYPE FILTER
+
 export const getFeedbackByTypeController = async (req, res) => {
   try {
-    const { type } = req.query; 
+    const { type } = req.query;
 
     const filter = type ? { type } : {};
 
